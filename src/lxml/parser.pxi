@@ -806,6 +806,7 @@ cdef class _BaseParser:
     cdef bint _remove_pis
     cdef bint _strip_cdata
     cdef bint _collect_ids
+    cdef bint _resolve_external_entities
     cdef XMLSchema _schema
     cdef bytes _filename
     cdef readonly object target
@@ -814,7 +815,7 @@ cdef class _BaseParser:
 
     def __init__(self, int parse_options, bint for_html, XMLSchema schema,
                  remove_comments, remove_pis, strip_cdata, collect_ids,
-                 target, encoding):
+                 target, encoding, bint resolve_external_entities=True):
         cdef tree.xmlCharEncodingHandler* enchandler
         cdef int c_encoding
         if not isinstance(self, (XMLParser, HTMLParser)):
@@ -827,6 +828,7 @@ cdef class _BaseParser:
         self._remove_pis = remove_pis
         self._strip_cdata = strip_cdata
         self._collect_ids = collect_ids
+        self._resolve_external_entities = resolve_external_entities
         self._schema = schema
 
         self._resolvers = _ResolverRegistry()
@@ -906,6 +908,9 @@ cdef class _BaseParser:
         if self._strip_cdata:
             # hard switch-off for CDATA nodes => makes them plain text
             pctxt.sax.cdataBlock = NULL
+        if not self._resolve_external_entities:
+            pctxt.sax.getEntity = _getInternalEntityOnly
+            pctxt.sax.getParameterEntity = NULL  # Disable parameter entities completely.
 
     cdef int _registerHtmlErrorHandler(self, xmlparser.xmlParserCtxt* c_ctxt) except -1:
         cdef xmlparser.xmlSAXHandler* sax = c_ctxt.sax
@@ -1207,6 +1212,69 @@ cdef class _BaseParser:
             context.cleanup()
 
 
+cdef tree.xmlEntity* _getInternalEntityOnly(void* ctxt, const_xmlChar* name) nogil:
+    """
+    Callback function to intercept the entity resolution when external entity loading is disabled.
+    """
+    cdef tree.xmlEntity* entity
+    cdef xmlerror.xmlError c_error
+    cdef xmlerror.xmlStructuredErrorFunc err_func
+    cdef xmlparser.xmlParserInput* parser_input
+    cdef xmlparser.xmlParserCtxt* c_ctxt
+    cdef void* err_context
+
+    entity = xmlparser.xmlSAX2GetEntity(ctxt, name)
+    if not entity:
+        return NULL
+    if entity.etype not in (
+            tree.XML_EXTERNAL_GENERAL_PARSED_ENTITY,
+            tree.XML_EXTERNAL_GENERAL_UNPARSED_ENTITY,
+            tree.XML_EXTERNAL_PARAMETER_ENTITY):
+        return entity
+
+    # Reject all external entities and fail the parsing instead. There is currently
+    # no way in libxml2 to just prevent the entity resolution in this case.
+    c_ctxt = <xmlparser.xmlParserCtxt*> ctxt
+    err_func = xmlerror.xmlStructuredError
+    if err_func is not NULL:
+        parser_input = c_ctxt.input
+        # Copied from xmlVErrParser() in libxml2: get current input from stack.
+        if (parser_input is not NULL and parser_input.filename is NULL
+                and c_ctxt.inputNr > 1):
+            parser_input = c_ctxt.inputTab[c_ctxt.inputNr - 2]
+
+        # Build the error report by hand: all fields must be initialised since
+        # the receiving error handler reads the struct as a whole.
+        cstring_h.memset(&c_error, 0, sizeof(c_error))
+        c_error.domain = xmlerror.XML_FROM_PARSER
+        c_error.code = xmlerror.XML_ERR_EXT_ENTITY_STANDALONE
+        c_error.level = xmlerror.XML_ERR_FATAL
+        c_error.message = (
+            b"External entity resolution is disabled for security reasons "
+            b"when resolving '&%s;'. Use 'XMLParser(resolve_entities=True)' "
+            b"if you consider it safe to enable it.")
+        c_error.node = <void*> entity
+        c_error.str1 = <char*> name
+        c_error.str2 = NULL
+        c_error.str3 = NULL
+        c_error.int1 = 0
+        if parser_input is not NULL:
+            c_error.file = <char*> parser_input.filename
+            c_error.line = parser_input.line
+            c_error.int2 = parser_input.col
+        else:
+            c_error.file = NULL
+            c_error.line = 0
+            c_error.int2 = 0
+
+        err_context = xmlerror.xmlStructuredErrorContext
+        err_func(err_context, &c_error)
+
+    c_ctxt.wellFormed = 0
+    # The entity was looked up and does not need to be freed.
+    return NULL
+
+
 cdef void _initSaxDocument(void* ctxt) with gil:
     xmlparser.xmlSAX2StartDocument(ctxt)
     c_ctxt = <xmlparser.xmlParserCtxt*>ctxt
@@ -1478,7 +1546,7 @@ _XML_DEFAULT_PARSE_OPTIONS = (
     )
 
 cdef class XMLParser(_FeedParser):
-    u"""XMLParser(self, encoding=None, attribute_defaults=False, dtd_validation=False, load_dtd=False, no_network=True, ns_clean=False, recover=False, schema: XMLSchema =None, huge_tree=False, remove_blank_text=False, resolve_entities=True, remove_comments=False, remove_pis=False, strip_cdata=True, collect_ids=True, target=None, compact=True)
+    u"""XMLParser(self, encoding=None, attribute_defaults=False, dtd_validation=False, load_dtd=False, no_network=True, ns_clean=False, recover=False, schema: XMLSchema =None, huge_tree=False, remove_blank_text=False, resolve_entities='internal', remove_comments=False, remove_pis=False, strip_cdata=True, collect_ids=True, target=None, compact=True)
 
     The XML parser.
 
@@ -1508,12 +1576,15 @@ cdef class XMLParser(_FeedParser):
     - strip_cdata        - replace CDATA sections by normal text content (default: True)
     - compact            - save memory for short text content (default: True)
     - collect_ids        - use a hash table of XML IDs for fast access (default: True, always True with DTD validation)
-    - resolve_entities   - replace entities by their text value (default: True)
     - huge_tree          - disable security restrictions and support very deep trees
                            and very long text content (only affects libxml2 2.7+)
 
     Other keyword arguments:
 
+    - resolve_entities - replace entities by their text value: False for keeping the
+          entity references, True for resolving them, and 'internal' for resolving
+          internal definitions only (no external file/URL access).
+          The default used to be True and was changed to 'internal' in lxml 5.0.
     - encoding - override the document encoding (note: libiconv encoding name)
     - target   - a parser target object that will receive the parse events
     - schema   - an XMLSchema to validate against
@@ -1525,10 +1596,11 @@ cdef class XMLParser(_FeedParser):
     def __init__(self, *, encoding=None, attribute_defaults=False,
                  dtd_validation=False, load_dtd=False, no_network=True,
                  ns_clean=False, recover=False, XMLSchema schema=None,
-                 huge_tree=False, remove_blank_text=False, resolve_entities=True,
+                 huge_tree=False, remove_blank_text=False, resolve_entities='internal',
                  remove_comments=False, remove_pis=False, strip_cdata=True,
                  collect_ids=True, target=None, compact=True):
         cdef int parse_options
+        cdef bint resolve_external = True
         parse_options = _XML_DEFAULT_PARSE_OPTIONS
         if load_dtd:
             parse_options = parse_options | xmlparser.XML_PARSE_DTDLOAD
@@ -1553,12 +1625,14 @@ cdef class XMLParser(_FeedParser):
             parse_options = parse_options ^ xmlparser.XML_PARSE_COMPACT
         if not resolve_entities:
             parse_options = parse_options ^ xmlparser.XML_PARSE_NOENT
+        elif resolve_entities == 'internal':
+            resolve_external = False
         if not strip_cdata:
             parse_options = parse_options ^ xmlparser.XML_PARSE_NOCDATA
 
         _BaseParser.__init__(self, parse_options, 0, schema,
                              remove_comments, remove_pis, strip_cdata,
-                             collect_ids, target, encoding)
+                             collect_ids, target, encoding, resolve_external)
 
 
 cdef class XMLPullParser(XMLParser):
@@ -1594,7 +1668,7 @@ cdef class ETCompatXMLParser(XMLParser):
     u"""ETCompatXMLParser(self, encoding=None, attribute_defaults=False, \
                  dtd_validation=False, load_dtd=False, no_network=True, \
                  ns_clean=False, recover=False, schema=None, \
-                 huge_tree=False, remove_blank_text=False, resolve_entities=True, \
+                 huge_tree=False, remove_blank_text=False, resolve_entities='internal', \
                  remove_comments=True, remove_pis=True, strip_cdata=True, \
                  target=None, compact=True)
 
@@ -1608,7 +1682,7 @@ cdef class ETCompatXMLParser(XMLParser):
     def __init__(self, *, encoding=None, attribute_defaults=False,
                  dtd_validation=False, load_dtd=False, no_network=True,
                  ns_clean=False, recover=False, schema=None,
-                 huge_tree=False, remove_blank_text=False, resolve_entities=True,
+                 huge_tree=False, remove_blank_text=False, resolve_entities='internal',
                  remove_comments=True, remove_pis=True, strip_cdata=True,
                  target=None, compact=True):
         XMLParser.__init__(self,

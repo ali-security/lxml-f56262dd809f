@@ -1,7 +1,7 @@
 from libc.string cimport const_char
 
 from lxml.includes.tree cimport (
-    xmlDoc, xmlNode, xmlDict, xmlDtd, xmlChar, const_xmlChar)
+    xmlDoc, xmlNode, xmlEntity, xmlDict, xmlDtd, xmlChar, const_xmlChar)
 from lxml.includes.tree cimport xmlInputReadCallback, xmlInputCloseCallback
 from lxml.includes.xmlerror cimport xmlError, xmlStructuredErrorFunc
 
@@ -47,11 +47,14 @@ cdef extern from "libxml/parser.h":
 
     ctypedef void (*referenceSAXFunc)(void * ctx, const_xmlChar* name)
 
+    ctypedef xmlEntity* (*getEntitySAXFunc)(void* ctx, const_xmlChar* name) nogil
+
     cdef int XML_SAX2_MAGIC
 
 cdef extern from "libxml/tree.h":
     ctypedef struct xmlParserInput:
         int line
+        int col
         int length
         const_xmlChar* base
         const_xmlChar* cur
@@ -76,6 +79,8 @@ cdef extern from "libxml/tree.h":
         charactersSAXFunc               characters
         cdataBlockSAXFunc               cdataBlock
         referenceSAXFunc                reference
+        getEntitySAXFunc                getEntity
+        getEntitySAXFunc                getParameterEntity
         commentSAXFunc                  comment
         processingInstructionSAXFunc	processingInstruction
         startDocumentSAXFunc            startDocument
@@ -87,6 +92,7 @@ cdef extern from "libxml/tree.h":
 
 cdef extern from "libxml/SAX2.h" nogil:
     cdef void xmlSAX2StartDocument(void* ctxt)
+    cdef xmlEntity* xmlSAX2GetEntity(void* ctxt, const_xmlChar* name)
 
 
 cdef extern from "libxml/xmlIO.h" nogil:
@@ -150,6 +156,8 @@ cdef extern from "libxml/parser.h":
         int inSubset
         int charset
         xmlParserInput* input
+        int inputNr
+        xmlParserInput** inputTab
 
     ctypedef enum xmlParserOption:
         XML_PARSE_RECOVER = 1 # recover on errors
