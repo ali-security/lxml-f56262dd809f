@@ -1,222 +1,366 @@
-name: CI
+# NOTE (seal build): upstream's CI test workflow has been replaced by the
+# non-Linux half of the wheel build.  The full matrix cannot complete inside a
+# single dispatch window, so it is split across two workflows that are
+# dispatched separately: wheels.yml carries the sdist and the Linux legs, and
+# this file carries the 29 macOS/Windows legs.  Every CPython leg runs lxml's
+# own full test suite against the wheel it just built, which is strictly more
+# test coverage than the CI workflow it replaces.
+name: Wheel build (non-Linux)
 
 on:
-  push:
-    paths:
-      - '**'
-      - '!.github/**'
-      - '.github/workflows/ci.yml'
-  pull_request:
-    paths:
-      - '**'
-      - '!.github/**'
-      - '.github/workflows/ci.yml'
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: true
-
-permissions:
-  contents: read  # to fetch code (actions/checkout)
+permissions: {}
 
 jobs:
-  ci:
+  non-Linux:
     strategy:
       # Allows for matrix sub-jobs to fail without canceling the rest
       fail-fast: false
 
-      # MATRIX:
-      # =======
-      # Required parameters:
-      #  os                  the os to run on
-      #  python-version      the python version to use
-      #  backend             the backend to use
-      #  env                 any additional env variables. Set to '{}' for none
-      # Optional parameters:
-      #  allowed_failure     whether the job is allowed to fail
-      #  extra_hash          extra hash str to differentiate from other caches with similar name (must always start with '-')
       matrix:
-        # Tests [amd64]
-        #
-        os: [ubuntu-latest, macos-11, windows-2019]
+        os: [macos-latest, windows-latest]
+        #os: [macos-10.15, windows-latest]
+        #os: [macos-10.15]
         python-version:
           - "2.7"
           - "3.6"
           - "3.7"
           - "3.8"
           - "3.9"
-          - "3.10"  # quotes to avoid being interpreted as the number 3.1
+          - "3.10"
           - "3.11"
           - "3.12"
-        env: [{ STATIC_DEPS: true }, { STATIC_DEPS: false }]
-
-        include:
-          #- os: windows-2016
-          #  python-version: 2.7
-          #  env: { STATIC_DEPS: true }  # always static
-
-          #- python-version: "3.12-dev"
-          #  allowed_failure: true
-
-          - os: ubuntu-latest
-            python-version: "3.9"
-            env: {STATIC_DEPS: true, WITH_REFNANNY: true}
-            extra_hash: "-refnanny"
-            allowed_failure: true
-          - os: ubuntu-latest
-            python-version: "3.11"
-            env: {STATIC_DEPS: true, WITH_REFNANNY: true}
-            extra_hash: "-refnanny"
-            allowed_failure: true
-          # Coverage setup
-          - os: ubuntu-latest
-            python-version: "3.9"
-            env: { COVERAGE: true }
-            extra_hash: "-coverage"
-            allowed_failure: true   # shouldn't fail but currently does...
-          - os: ubuntu-latest
-            python-version: "3.9"
-            env: { STATIC_DEPS: false, EXTRA_DEPS: "docutils pygments sphinx sphinx-rtd-theme" }
-            extra_hash: "-docs"
-            allowed_failure: true   # shouldn't fail but currently does...
-          # Old library setup with minimum version requirements
-          - os: ubuntu-latest
-            python-version: "3.9"
-            env: {
-              STATIC_DEPS: true,
-              LIBXML2_VERSION: 2.9.2,
-              LIBXSLT_VERSION: 1.1.27,
-            }
-            extra_hash: "-oldlibs"
-            allowed_failure: true   # shouldn't fail but currently does...
-          # Ubuntu sub-jobs:
-          # ================
-          # Pypy
-          - os: ubuntu-latest
-            python-version: pypy-2.7
-            env: { STATIC_DEPS: false }
-            allowed_failure: true
-          - os: ubuntu-latest
-            python-version: pypy-3.7
-            env: { STATIC_DEPS: false }
-            allowed_failure: true
-          - os: ubuntu-latest
-            python-version: pypy-3.8
-            env: { STATIC_DEPS: false }
-            allowed_failure: true
-          - os: ubuntu-latest
-            python-version: pypy-3.9
-            env: { STATIC_DEPS: false }
-            allowed_failure: true
-          - os: ubuntu-latest
-            python-version: pypy-3.10
-            env: { STATIC_DEPS: false }
-            allowed_failure: true
-
-          # MacOS sub-jobs
-          # ==============
-          #- os: macos-latest
-          #  allowed_failure: true   # Unicode parsing fails in Py3
-
-          - os: ubuntu-20.04
-            python-version: "3.6"
-            env: { STATIC_DEPS: true }  # only static
+          - "pypy-3.8-v7.3.7"
+          - "pypy-3.9-v7.3.12"
+          - "pypy-3.10-v7.3.13"
+        # win32 wheels are part of the published set, so Windows builds both
+        # bitnesses.  macOS is x86_64/universal2 only (see runs-on below).
+        architecture: [x64, x86]
 
         exclude:
-          - os: ubuntu-latest
-            python-version: "3.6"
+          - os: macos-latest
+            python-version: "2.7"  # no macOS cp27 wheel is published
+          - os: macos-latest
+            architecture: x86      # macOS has no 32bit builds
+          # PyPy publishes no Windows 32bit builds
+          - os: windows-latest
+            architecture: x86
+            python-version: "pypy-3.8-v7.3.7"
+          - os: windows-latest
+            architecture: x86
+            python-version: "pypy-3.9-v7.3.12"
+          - os: windows-latest
+            architecture: x86
+            python-version: "pypy-3.10-v7.3.13"
 
-          # Windows sub-jobs
-          # ==============
-          - os: windows-2019
-            python-version: 2.7  # needs older image
-          - os: windows-2019
-            env: { STATIC_DEPS: false }  # always static
+    # Only cp311/cp312 publish macosx_11_0_universal2 (built on the arm64
+    # runner); every other macOS wheel, including all PyPy ones, is
+    # macosx_11_0_x86_64 and therefore needs the Intel runner.
+    runs-on: ${{ (matrix.os == 'macos-latest' && !contains(fromJSON('["3.11","3.12"]'), matrix.python-version)) && 'macos-15-intel' || matrix.os }}
+    timeout-minutes: 120
 
-    # This defaults to 360 minutes (6h) which is way too long and if a test gets stuck, it can block other pipelines.
-    # From testing, the runs tend to take ~3 minutes, so a limit of 20 minutes should be enough. This can always be
-    # changed in the future if needed.
-    timeout-minutes: 20
-    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
 
-    env:
-      OS_NAME: ${{ matrix.os }}
-      PYTHON_VERSION: ${{ matrix.python-version }}
-      MACOSX_DEPLOYMENT_TARGET: 11.0
-      LIBXML2_VERSION: 2.10.3
-      LIBXSLT_VERSION: 1.1.39
-      COVERAGE: false
-      GCC_VERSION: 9
-      USE_CCACHE: 1
-      CCACHE_SLOPPINESS: "pch_defines,time_macros"
-      CCACHE_COMPRESS: 1
-      CCACHE_MAXSIZE: "100M"
+    env: { LIBXML2_VERSION: 2.10.3, LIBXSLT_VERSION: 1.1.39, MACOSX_DEPLOYMENT_TARGET: 11.0 }
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
+    - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        if: startsWith(matrix.python-version, '3.')
-        with:
-          python-version: ${{ matrix.python-version }}
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      if: startsWith(matrix.python-version, '3.') || startsWith(matrix.python-version, 'pypy')
+      with:
+        python-version: ${{ matrix.python-version }}
+        architecture: ${{ matrix.os == 'windows-latest' && matrix.architecture || '' }}
 
-      - name: Setup Python2 (Linux)
-        if: matrix.python-version == '2.7' && startsWith(matrix.os, 'ubuntu')
-        run: |
-            sudo ln -fs python2 /usr/bin/python
-            sudo apt-get update
-            sudo apt-get install python-setuptools python2-dev
-            curl https://bootstrap.pypa.io/pip/2.7/get-pip.py --output get-pip.py
-            sudo python2 get-pip.py
-            ls -l /usr/bin/pip* /usr/local/bin/pip*
-            which pip
+    - name: Set up Python 2.7 (Windows)
+      # setup-python has no 2.7, so install it from python.org, per bitness.
+      if: runner.os == 'Windows' && matrix.python-version == '2.7'
+      shell: pwsh
+      run: |
+        $arch = "${{ matrix.architecture }}"
+        if ($arch -eq "x86") {
+          $msi = "python-2.7.18.msi"
+          $target = "C:\Python27-x86"
+          $wantBits = "32"
+        } else {
+          $msi = "python-2.7.18.amd64.msi"
+          $target = "C:\Python27-x64"
+          $wantBits = "64"
+        }
+        $msiPath = Join-Path $env:RUNNER_TEMP $msi
+        Invoke-WebRequest -Uri "https://www.python.org/ftp/python/2.7.18/$msi" -OutFile $msiPath
+        $p = Start-Process msiexec -ArgumentList "/i","`"$msiPath`"","/qn","ALLUSERS=1","TARGETDIR=$target" -Wait -PassThru
+        if ($p.ExitCode -ne 0) { throw "Python 2.7 MSI install failed with exit code $($p.ExitCode)" }
+        if (-not (Test-Path "$target\python.exe")) { throw "Python 2.7 not found at $target" }
+        $bits = (& "$target\python.exe" -c "import struct; print(struct.calcsize('P') * 8)").Trim()
+        if ($bits -ne $wantBits) { throw "Python 2.7 bitness mismatch for $arch : got $bits, want $wantBits" }
+        & "$target\python.exe" -c "import sys; print(sys.version)"
+        # put this Python (and its Scripts dir) first on PATH for the rest of the leg
+        "$target" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        "$target\Scripts" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        $getPip = Join-Path $env:RUNNER_TEMP "get-pip.py"
+        Invoke-WebRequest -Uri "https://bootstrap.pypa.io/pip/2.7/get-pip.py" -OutFile $getPip
+        & "$target\python.exe" $getPip "pip<21" "setuptools==44.1.1" "wheel==0.37.1"
+        if ($LASTEXITCODE -ne 0) { throw "get-pip.py bootstrap failed" }
+        & "$target\python.exe" -m pip --version
 
-      - name: Install MacOS dependencies
-        if: startsWith(runner.os, 'mac')
-        run: |
-          brew install automake libtool ccache
-          ln -s /usr/local/bin/glibtoolize /usr/local/bin/libtoolize
+    - name: Install the Visual C++ Compiler Package for Python 2.7 (Windows)
+      # Machine-wide (ALLUSERS=1) so setuptools 44.1.1's find_vcvarsall patch
+      # picks it up from HKLM\Software\[Wow6432Node\]Microsoft\DevDiv\VCForPython\9.0.
+      # download.microsoft.com 404s now, so fetch the Web Archive raw copy.
+      if: runner.os == 'Windows' && matrix.python-version == '2.7'
+      shell: pwsh
+      run: |
+        $url = "https://web.archive.org/web/20210106040224id_/https://download.microsoft.com/download/7/9/6/796EF2E4-801B-4FC4-AB28-B59FBF6D907B/VCForPython27.msi"
+        $msiPath = Join-Path $env:RUNNER_TEMP "VCForPython27.msi"
+        Invoke-WebRequest -Uri $url -OutFile $msiPath
+        $size = (Get-Item $msiPath).Length
+        if ($size -ne 87891968) {
+          throw "VCForPython27.msi download is $size bytes, expected 87891968 - the archive URL served an interstitial instead of the MSI"
+        }
+        $p = Start-Process msiexec -ArgumentList "/i","`"$msiPath`"","/qn","ALLUSERS=1" -Wait -PassThru
+        if ($p.ExitCode -ne 0) { throw "VCForPython27.msi install failed with exit code $($p.ExitCode)" }
+        $keys = @(
+          "HKLM:\Software\Microsoft\DevDiv\VCForPython\9.0",
+          "HKLM:\Software\Wow6432Node\Microsoft\DevDiv\VCForPython\9.0"
+        )
+        if (-not ($keys | Where-Object { Test-Path $_ })) {
+          throw "VCForPython 9.0 registry key missing after install - ALLUSERS=1 did not take effect"
+        }
 
-      - name: Cache [ccache]
-        uses: pat-s/always-upload-cache@v3.0.11
-        if: startsWith(runner.os, 'Linux') || startsWith(runner.os, 'mac')
-        with:
-          path: ~/.ccache
-          key: ${{ runner.os }}-ccache${{ matrix.extra_hash }}-${{ matrix.python-version }}-${{ hashFiles('.github/workflows/ci.yml', 'tools/ci-run.sh') }}
+    - name: Use the MSVC 14.44 toolset
+      # The vendored iconv_a.lib members are LTCG IL produced by MSVC
+      # 14.44.35207; the runner's default 14.51+ linker rejects them (C1047).
+      if: runner.os == 'Windows' && matrix.python-version != '2.7'
+      shell: pwsh
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found at $vswhere" }
+        $vsPath = (& $vswhere -latest -products '*' -property installationPath | Select-Object -First 1)
+        if (-not $vsPath) { throw "vswhere found no Visual Studio installation" }
+        Write-Host "Visual Studio: $vsPath"
+        $toolsRoot = Join-Path $vsPath "VC\Tools\MSVC"
+        $component = "Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64"
+        if (-not (Get-ChildItem $toolsRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "14.44.*" })) {
+          Write-Host "Installing $component"
+          $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          if (-not (Test-Path $installer)) { throw "vs_installer.exe not found at $installer" }
+          $p = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList `
+            "modify","--installPath","`"$vsPath`"","--add",$component,"--quiet","--norestart","--nocache"
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+            throw "vs_installer modify failed with exit code $($p.ExitCode)"
+          }
+        }
+        $toolset = (Get-ChildItem $toolsRoot -Directory | Where-Object { $_.Name -like "14.44.*" } | Select-Object -First 1)
+        if (-not $toolset) { throw "MSVC 14.44 toolset still absent under $toolsRoot" }
+        Write-Host "Toolset: $($toolset.Name)"
+        $arch = if ("${{ matrix.architecture }}" -eq "x86") { "x86" } else { "x64" }
+        $vcvarsall = Join-Path $vsPath "VC\Auxiliary\Build\vcvarsall.bat"
+        $envDump = & cmd /c "`"$vcvarsall`" $arch -vcvars_ver=14.44 > nul 2>&1 && set"
+        if ($LASTEXITCODE -ne 0) { throw "vcvarsall.bat $arch -vcvars_ver=14.44 failed" }
+        $wanted = @(
+          "PATH","INCLUDE","LIB","LIBPATH","VSINSTALLDIR","VCINSTALLDIR",
+          "VCToolsVersion","VCToolsInstallDir","VCToolsRedistDir",
+          "WindowsSdkDir","WindowsSDKVersion","WindowsSdkBinPath","WindowsSdkVerBinPath",
+          "WindowsLibPath","UCRTVersion","UniversalCRTSdkDir",
+          "VSCMD_ARG_HOST_ARCH","VSCMD_ARG_TGT_ARCH"
+        )
+        foreach ($line in $envDump) {
+          if ($line -match "^([^=]+)=(.*)$") {
+            $name = $matches[1]
+            if ($wanted -contains $name) {
+              "$name=$($matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              if ($name -eq "VCToolsVersion") { Write-Host "VCToolsVersion=$($matches[2])" }
+            }
+          }
+        }
+        # make distutils reuse the environment above instead of probing for the newest toolset
+        "DISTUTILS_USE_SDK=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "MSSdk=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Run CI
-        continue-on-error: ${{ matrix.allowed_failure || false }}
-        env: ${{ matrix.env }}
-        run: bash -c 'GITHUB_API_TOKEN="${{ secrets.GITHUB_TOKEN }}"  bash ./tools/ci-run.sh'
+    - name: Install MacOS dependencies
+      if: startsWith(runner.os, 'mac')
+      run: |
+        # ghcr.io bottle downloads flake, so retry - still fatal after 3 attempts
+        for attempt in 1 2 3; do
+          if brew install automake libtool; then
+            break
+          fi
+          if [ "$attempt" = "3" ]; then
+            echo "brew install automake libtool failed after 3 attempts"
+            exit 1
+          fi
+          echo "brew install failed (attempt $attempt), retrying"
+          sleep 20
+        done
+        ln -s /usr/local/bin/glibtoolize /usr/local/bin/libtoolize
 
-      - name: Build docs
-        if: contains( matrix.env.EXTRA_DEPS, 'sphinx')
-        run: make html
+    - name: Set the macOS host platform
+      # Intel CPython legs must be tagged/built as macosx-11.0-x86_64.  PyPy is
+      # excluded on purpose: its .so files embed their native macosx-10.9/10.7
+      # build dir while still being TAGGED macosx_11_0, and setting this
+      # variable rewrites that and breaks byte parity.
+      if: runner.os == 'macOS' && runner.arch == 'X64' && !startsWith(matrix.python-version, 'pypy')
+      run: echo "_PYTHON_HOST_PLATFORM=macosx-11.0-x86_64" >> $GITHUB_ENV
 
-      - name: Upload docs
-        uses: actions/upload-artifact@v3
-        if: matrix.extra_hash == '-docs'
-        with:
-          name: website_html
-          path: doc/html
-          if-no-files-found: ignore
+    - name: Use the stdlib distutils (macOS PyPy 3.8 / 3.9)
+      # Reference wheels: pp38 -> build/lib.macosx-10.7-x86_64-3.8, pp39 -> -3.9,
+      # but pp310 -> build/lib.macosx-*-pypy310, so pypy-3.10 must NOT get this.
+      if: runner.os == 'macOS' && (startsWith(matrix.python-version, 'pypy-3.8') || startsWith(matrix.python-version, 'pypy-3.9'))
+      run: echo "SETUPTOOLS_USE_DISTUTILS=stdlib" >> $GITHUB_ENV
 
-      - name: Upload Coverage Report
-        uses: actions/upload-artifact@v3
-        with:
-          name: pycoverage_html
-          path: coverage*
-          if-no-files-found: ignore
+    - name: Install dependencies
+      # wheel 0.37.1/0.42.0 pins keep the wheels' "Generator:" metadata line in
+      # sync with the published artifacts (an unpinned install lands 0.48.0).
+      run: |
+        python -m pip install "wheel==${{ (matrix.python-version == '3.6' || matrix.python-version == '2.7') && '0.37.1' || '0.42.0' }}"
+        python -m pip install -r requirements.txt
+        python -m pip install --force-reinstall --upgrade "setuptools<70"
+      shell: bash
 
-      - name: Upload Wheel
-        uses: actions/upload-artifact@v3
-        if: matrix.env.STATIC_DEPS == true  ||  matrix.env.STATIC_DEPS == 'true'
-        with:
-          name: wheels-${{ runner.os }}
-          path: dist/*.whl
-          if-no-files-found: ignore
+    - name: Build wheels
+      # No RUN_TESTS here on purpose: setup.py's run-tests hook cannot see the
+      # freshly built binaries and is a silent no-op, so the suite is run
+      # explicitly against the installed wheel in the steps below.
+      run: make wheel
+      # GITHUB_API_TOKEN: buildlibxml.py reads the pinned libxml2-win-binaries
+      # release through api.github.com; unauthenticated it hits "HTTP Error
+      # 403: rate limit exceeded" once several Windows legs run at once.
+      env: { STATIC_DEPS: true, GITHUB_API_TOKEN: "${{ github.token }}" }
+
+    - name: Upload wheels
+      # Deliberately BEFORE the test steps, so the artifacts stay harvestable
+      # even when the suite below reports a genuine failure.
+      uses: actions/upload-artifact@v4
+      with:
+        name: wheels-${{ matrix.os }}-${{ matrix.architecture }}-${{ strategy.job-index }}
+        path: dist/lxml-*.whl
+        if-no-files-found: ignore
+
+    - name: Install the built wheel
+      # PyPy is the upstream carve-out: importing the test suite fails there on
+      # C-API 'str' differences, so PyPy legs build but do not run the suite.
+      if: ${{ !startsWith(matrix.python-version, 'pypy') }}
+      shell: bash
+      env:
+        PYTHONUNBUFFERED: 1
+      run: |
+        set -eu
+        if python -u -m pip install --no-index --find-links dist lxml; then
+          echo "STAGE: pip installed the built wheel"
+        else
+          # Old pip (e.g. 21.3 on Python 3.6) does not accept the modern macOS
+          # runner's 'macosx_11_0_x86_64' platform tag and reports
+          # "Could not find a version that satisfies the requirement lxml
+          # (from versions: none)" even though the wheel is right there in dist/.
+          # A wheel is a plain zip, so unpack it and put it on PYTHONPATH so the
+          # later import/test steps use exactly the artifact we just built.
+          echo "pip rejected the built wheel (unsupported platform tag for this pip version); unpacking the wheel manually instead."
+          LXML_INST="$PWD/../lxml-inst"
+          rm -rf "$LXML_INST"
+          mkdir -p "$LXML_INST"
+          python -u -c "import glob, sys, zipfile; wheels = sorted(glob.glob('dist/lxml-*.whl')); print('target dir: ' + sys.argv[1]); assert wheels, 'no wheel matching dist/lxml-*.whl'; print('wheel: ' + wheels[-1]); zipfile.ZipFile(wheels[-1]).extractall(sys.argv[1])" "$LXML_INST"
+          PATHSEP=$(python -u -c "import os; print(os.pathsep)")
+          echo "PYTHONPATH=${PYTHONPATH:-}${PYTHONPATH:+$PATHSEP}$LXML_INST" >> "$GITHUB_ENV"
+          echo "STAGE: unpacked the built wheel into $LXML_INST and appended it to PYTHONPATH"
+        fi
+        # html5lib is a test dependency of lxml.html.tests.test_html5parser
+        # (its "module missing" import hook no longer works on Python 3.12+).
+        python -u -m pip install "html5lib==1.1"
+        python -u -m pip list
+
+    - name: Import the built extension
+      # Own step on purpose: it runs from an empty scratch directory OUTSIDE the
+      # source tree, so `import lxml` can only resolve to the wheel just
+      # installed, and it separates "the extension crashes on import" from "one
+      # test module crashes" without any of the test-tree machinery below.
+      if: ${{ !startsWith(matrix.python-version, 'pypy') }}
+      shell: bash
+      env:
+        PYTHONUNBUFFERED: 1
+      run: |
+        set -eu
+        PYFLAGS="-u"
+        if python -c "import sys; sys.exit(0 if sys.version_info[:2] >= (3, 3) else 1)"; then
+          # faulthandler turns a hard crash into a Python traceback (CPython >= 3.3)
+          PYFLAGS="-u -X faulthandler"
+        fi
+        echo "PYFLAGS=$PYFLAGS"
+        rm -rf ../lxml-import-check
+        mkdir -p ../lxml-import-check
+        cd ../lxml-import-check
+        python -u -c "import os, sys; print('cwd: ' + os.getcwd()); print(sys.version)"
+        python $PYFLAGS -c "import lxml.etree, lxml.html; print(lxml.etree.__file__); print(lxml.etree.LXML_VERSION)"
+        echo "STAGE: lxml.etree and lxml.html imported OK"
+        python $PYFLAGS -c "import lxml.etree as e; print(e.LIBXML_VERSION); print(e.LIBXSLT_VERSION); print(e.tostring(e.fromstring('<a><b/></a>')))"
+        echo "STAGE: a parse/serialise round trip completed OK"
+
+    - name: Test the built wheel
+      if: ${{ !startsWith(matrix.python-version, 'pypy') }}
+      shell: bash
+      env:
+        PYTHONUNBUFFERED: 1
+        PYTHONIOENCODING: utf-8
+      run: |
+        set -eu
+        SRC="$PWD"
+        PYFLAGS="-u"
+        if python -c "import sys; sys.exit(0 if sys.version_info[:2] >= (3, 3) else 1)"; then
+          PYFLAGS="-u -X faulthandler"
+        fi
+        echo "PYFLAGS=$PYFLAGS"
+        # Run from OUTSIDE the source tree so that `import lxml` resolves to the
+        # installed wheel and never to ./src (which holds no compiled modules).
+        cd ..
+        rm -rf lxml-wheel-test
+        mkdir -p lxml-wheel-test
+        cp "$SRC/test.py" lxml-wheel-test/test.py
+        cd lxml-wheel-test
+        cat > collect_installed.py <<'PYEOF'
+        import os, shutil, sys
+        import lxml
+        installed = os.path.dirname(os.path.abspath(lxml.__file__))
+        print("installed lxml package: " + installed)
+        norm = installed.replace(os.sep, "/")
+        # The guard only exists to make sure we test the built wheel and never
+        # ./src: either pip put it in site-packages, or the "Install the built
+        # wheel" step unpacked the wheel itself (old pip rejecting the platform
+        # tag), which leaves the wheel's own .dist-info next to the package.
+        import glob
+        unpacked_wheel = glob.glob(os.path.join(os.path.dirname(installed), "lxml-*.dist-info"))
+        if ("site-packages" not in norm and "dist-packages" not in norm
+                and not unpacked_wheel):
+            sys.exit("refusing to test %s - not an installed package" % installed)
+        target = os.path.join(os.getcwd(), "src", "lxml")
+        shutil.copytree(installed, target)
+        source = sys.argv[1]
+        shutil.copytree(os.path.join(source, "src", "lxml", "tests"),
+                        os.path.join(target, "tests"))
+        shutil.copytree(os.path.join(source, "src", "lxml", "html", "tests"),
+                        os.path.join(target, "html", "tests"))
+        # the doctests read ../../../doc/*.txt and samples/*.xml relative to here
+        shutil.copytree(os.path.join(source, "doc"), os.path.join(os.getcwd(), "doc"))
+        shutil.copytree(os.path.join(source, "samples"), os.path.join(os.getcwd(), "samples"))
+        print("test tree ready at " + target)
+        sys.stdout.flush()
+        PYEOF
+        python $PYFLAGS collect_installed.py "$SRC"
+        rm -f collect_installed.py
+        # test.py imports every test module before it prints anything, so list
+        # the discovered files first: that tells "the harness copy is wrong"
+        # apart from "importing a test module crashes the interpreter".
+        python $PYFLAGS ./test.py --list-files
+        echo "STAGE: test files discovered; importing and running the suite now"
+        # lxml's own runner (repo root test.py) discovers ./src/lxml/tests and
+        # ./src/lxml/html/tests, prints every test plus a "Ran N tests" summary
+        # and exits non-zero on any failure or error.
+        # The one test id filtered out below tests the *stdlib*
+        # xml.etree.ElementTree.XMLPullParser (etree = ElementTree), not lxml:
+        # expat 2.6's reparse deferral (shipped in CPython 3.9.19+/3.10.14+/
+        # 3.11.9+/3.12.3+) delays its incremental events, so it fails on every
+        # current CPython patch release regardless of lxml.  No lxml test is
+        # filtered; lxml's own ETreePullTestCase equivalent still runs.
+        python $PYFLAGS ./test.py -vv '' '!^lxml\.tests\.test_elementtree\.ElementTreePullTestCase\.test_simple_xml$'

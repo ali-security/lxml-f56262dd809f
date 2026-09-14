@@ -33,6 +33,74 @@ STATIC_LIBRARY_DIRS = static_env_list("LXML_STATIC_LIBRARY_DIRS", separator=os.p
 STATIC_CFLAGS = static_env_list("LXML_STATIC_CFLAGS")
 STATIC_BINARIES = static_env_list("LXML_STATIC_BINARIES", separator=os.pathsep)
 
+
+def disable_msvc_ltcg():
+    """Remove MSVC's link time code generation flags ('/GL', '/LTCG').
+
+    distutils enables them by default, which is not how the published wheels
+    were built.  Appending '/GL-' or '/LTCG:OFF' does not help: distutils puts
+    its own '/LTCG' at the front of the link line, where it wins.
+
+    The second half forces the *dynamic* CRT in the cases where distutils falls
+    back to the static one:
+      * on 32bit builds the static CRT fails to link with LNK2001,
+      * on CPython 3.6/x64 it links silently, but the resulting extensions do
+        not import VCRUNTIME140.dll, unlike the published cp36 win_amd64 wheel.
+    """
+    if not sys.platform.startswith('win'):
+        return
+
+    force_dynamic_crt = sys.version_info[:2] == (3, 6) or sys.maxsize <= 2**32
+
+    flag_list_names = (
+        'compile_options', 'compile_options_debug',
+        'ldflags_exe', 'ldflags_exe_debug',
+        'ldflags_shared', 'ldflags_shared_debug',
+        'ldflags_static', 'ldflags_static_debug',
+    )
+
+    def scrub_flags(compiler):
+        for list_name in flag_list_names:
+            flags = getattr(compiler, list_name, None)
+            if not flags:
+                continue
+            cleaned = [
+                flag for flag in flags
+                if not flag.upper().startswith(('/GL', '/LTCG'))
+            ]
+            if force_dynamic_crt and list_name.startswith('compile_options'):
+                cleaned = [
+                    flag for flag in cleaned
+                    if flag.upper() not in ('/MT', '/MTD')
+                ]
+                if not any(flag.upper() in ('/MD', '/MDD') for flag in cleaned):
+                    cleaned.append('/MDd' if list_name.endswith('_debug') else '/MD')
+            flags[:] = cleaned
+
+    def wrap_initialize(original_initialize):
+        def initialize(self, *args, **kwargs):
+            original_initialize(self, *args, **kwargs)
+            scrub_flags(self)
+        return initialize
+
+    for module_name in ('distutils._msvccompiler', 'distutils.msvc9compiler',
+                        'setuptools._distutils._msvccompiler',
+                        'setuptools._distutils.msvc9compiler'):
+        try:
+            __import__(module_name)
+        except ImportError:
+            continue
+        module = sys.modules.get(module_name)
+        compiler_class = getattr(module, 'MSVCCompiler', None)
+        if compiler_class is None or getattr(compiler_class, '_lxml_no_ltcg', False):
+            continue
+
+        compiler_class.initialize = wrap_initialize(compiler_class.initialize)
+        compiler_class._lxml_no_ltcg = True
+
+
+disable_msvc_ltcg()
+
 # create lxml-version.h file
 versioninfo.create_version_h()
 lxml_version = versioninfo.version()
